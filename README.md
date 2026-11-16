@@ -3,6 +3,8 @@
 Seasonal effects on the Windows desktop, a bit like what macOS does, but more low-key.
 Free, open source, no ads, no internet connection.
 
+[▶ Watch the demo](docs/demo.mp4)
+
 | Season | Status |
 |---|---|
 | Winter: snow | available |
