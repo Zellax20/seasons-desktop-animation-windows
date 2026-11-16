@@ -11,14 +11,15 @@ internal static unsafe class Program
     const string SettingsKey = @"Software\Seasons";
     const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     const uint TrayMessage = WM_APP + 1;
-    const int CmdPause = 1, CmdLow = 2, CmdMedium = 3, CmdStartup = 4, CmdQuit = 5, CmdWallpaper = 6, CmdOverlay = 7;
+    const int CmdPause = 1, CmdLow = 2, CmdMedium = 3, CmdStartup = 4, CmdQuit = 5, CmdWallpaper = 6, CmdOverlay = 7,
+              CmdHigh = 8, CmdStorm = 9;
 
     static IntPtr s_overlay, s_tray, s_icon;
     static uint s_taskbarCreated;
 
     // Shared between the UI thread (icon, menu) and the render thread
-    static volatile bool s_paused, s_quit, s_displayChanged, s_densityChanged;
-    static volatile int s_density;   // 0 = low, 1 = medium
+    static volatile bool s_paused, s_quit, s_displayChanged, s_densityChanged, s_stormToggle, s_stormActive;
+    static volatile int s_density;   // 0 = low, 1 = medium, 2 = high
     static volatile int s_mode;      // 0 = wallpaper only, 1 = on top of windows
 
     [STAThread]
@@ -146,6 +147,8 @@ internal static unsafe class Program
             }
 
             if (s_densityChanged) { s_densityChanged = false; snow.SetDensity(s_density); }
+            if (s_stormToggle) { s_stormToggle = false; snow.ToggleStorm(); }
+            s_stormActive = snow.StormActive;
 
             if (!shown)
             {
@@ -223,7 +226,9 @@ internal static unsafe class Program
         AppendMenuW(mode, MF_STRING | (s_mode == 1 ? MF_CHECKED : 0), CmdOverlay, "On top of windows");
         AppendMenuW(density, MF_STRING | (s_density == 0 ? MF_CHECKED : 0), CmdLow, "Low");
         AppendMenuW(density, MF_STRING | (s_density == 1 ? MF_CHECKED : 0), CmdMedium, "Medium");
+        AppendMenuW(density, MF_STRING | (s_density == 2 ? MF_CHECKED : 0), CmdHigh, "High");
         AppendMenuW(menu, MF_STRING | (s_paused ? MF_CHECKED : 0), CmdPause, "Pause");
+        AppendMenuW(menu, MF_STRING | (s_stormActive ? MF_CHECKED : 0), CmdStorm, "Snowstorm");
         AppendMenuW(menu, MF_POPUP, (UIntPtr)(nuint)mode, "Display");
         AppendMenuW(menu, MF_POPUP, (UIntPtr)(nuint)density, "Density");
         AppendMenuW(menu, MF_SEPARATOR, UIntPtr.Zero, null);
@@ -242,6 +247,8 @@ internal static unsafe class Program
             case CmdPause: s_paused = !s_paused; break;
             case CmdLow: SetDensity(0); break;
             case CmdMedium: SetDensity(1); break;
+            case CmdHigh: SetDensity(2); break;
+            case CmdStorm: s_paused = false; s_stormToggle = true; break;
             case CmdWallpaper: SetMode(0); break;
             case CmdOverlay: SetMode(1); break;
             case CmdStartup: SetStartup(!StartupEnabled()); break;
@@ -256,7 +263,7 @@ internal static unsafe class Program
         try
         {
             using RegistryKey k = Registry.CurrentUser.OpenSubKey(SettingsKey);
-            s_density = k?.GetValue("Density") is int v && v == 1 ? 1 : 0;
+            s_density = k?.GetValue("Density") is int v && v >= 0 && v <= 2 ? v : 0;
             s_mode = k?.GetValue("Mode") is int m && m == 1 ? 1 : 0;
         }
         catch { s_density = 0; s_mode = 0; }

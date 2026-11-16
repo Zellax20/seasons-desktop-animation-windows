@@ -27,6 +27,9 @@ push them around with the mouse.
 - Two display modes:
   - **Wallpaper only** (default): flakes stay behind your windows.
   - **On top of windows**: flakes fall in front of everything.
+- **Snowstorm** on demand: for about a minute, a blizzard takes over the desktop. Thousands of flakes
+  streak sideways in waves, violent gusts rip the snow off your windows and throw it downwind, and
+  everything gets buried much faster. It leaves deeper snow behind, which slowly settles.
 - Hides itself when an app goes fullscreen (games, videos).
 - Clicks go straight through: it never gets in the way.
 
@@ -36,8 +39,9 @@ A snowflake icon shows up next to the clock (it may be hidden behind the small `
 Click it to open the menu:
 
 - **Pause**: hides the effect without closing the app
+- **Snowstorm**: starts a storm (click again to stop it early)
 - **Display**: wallpaper only, or on top of windows
-- **Density**: low or medium
+- **Density**: low, medium or high
 - **Start with Windows**
 - **Quit**
 

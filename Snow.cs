@@ -12,19 +12,25 @@ internal sealed unsafe class Snow
     const float MouseRadius = 80f;        // how far the mouse pushes flakes
     const float CapMax = 6f;              // snow thickness on a window
     const float CapFillSeconds = 40f;     // time for a window to get fully covered
-    const float GroundMax = 14f;          // snow thickness on the ground (taskbar)
+    const float GroundMax = 20f;          // snow thickness on the ground (taskbar)
     const float GroundPile = 3f;          // a pile on the ground can reach GroundMax * 3
     const float CapPile = 2.2f;           // same thing on windows
     const float GroundFillSeconds = 60f;
     const float CapOpacity = 0.86f;
     const float LandChance = 0.55f;
-    const int MaxDebris = 3000;
+    const int MaxDebris = 5000;
+    const float StormSeconds = 60f;       // how long a snowstorm lasts
+    const float StormArea = 450f;         // at full strength a storm adds 1 flake per 450 px²
+    const int MaxFlakes = 10000;
     static readonly float[] WindFactor = { 0.5f, 0.8f, 1.1f };
 
     struct Flake
     {
         public float X, Y, R, Vy, Op, Phase, SwayAmp, SwayFreq, Pvx, Pvy;
         public byte Layer;   // 0 = far (small, slow, blurry), 2 = near
+        public bool OnWall;  // storm only: the flake hit the side of a window and is sliding down it
+        public float WallB;  // how far down it slides before breaking apart (screen y)
+        public sbyte WallDir; // which way the window is from the flake (+1 = to its right)
     }
 
     // Falling snow. With Mass > 0 it settles wherever it lands (Mass = area in px²),
@@ -57,7 +63,10 @@ internal sealed unsafe class Snow
     POINT _prevCur;
     int _curDx;
     Flake[] _flakes = Array.Empty<Flake>();
-    int _count;
+    int _count, _baseCount;
+    float _storm, _stormLeft, _stormDir = 1f, _stormClock;   // _storm goes from 0 (calm) to 1 (full storm)
+    float _blast, _blastTimer;                               // violent gusts that hit every few seconds
+    float _flakeWind, _flakeSpeed = 1f;
     readonly List<Debris> _debris = new();
     readonly Dictionary<IntPtr, Cap> _caps = new();
     readonly List<IntPtr> _gone = new();
@@ -94,12 +103,73 @@ internal sealed unsafe class Snow
 
     public void SetDensity(int density)
     {
-        // roughly 1 flake per 36,000 px² on low, 18,000 on medium
+        // roughly 1 flake per 9,000 px² on low, 3,000 on medium, 1,000 on high
         float logicalArea = (float)_w * _h / (_s * _s);
-        int target = Math.Clamp((int)(logicalArea / (density == 0 ? 36000f : 18000f)), 20, 1200);
+        float perFlake = density == 0 ? 9000f : density == 1 ? 3000f : 1000f;
+        _baseCount = Math.Clamp((int)(logicalArea / perFlake), 20, 5000);
+        SetCount(Math.Max(_baseCount, Math.Min(_count, StormTarget())));
+    }
+
+    void SetCount(int target)
+    {
         if (_flakes.Length < target) Array.Resize(ref _flakes, target);
         for (int i = _count; i < target; i++) Spawn(ref _flakes[i], true);
         _count = target;
+    }
+
+    int StormTarget() => Math.Min(MaxFlakes, _baseCount + (int)(_storm * _w * _h / (_s * _s) / StormArea));
+
+    // --- Snowstorm ---
+
+    // The window may have moved, closed or been minimized since the flake hit it.
+    bool StillOnWall(in Flake f)
+    {
+        float sx = f.X + _ox + f.WallDir * (12f * _s + f.R), sy = f.Y + _oy;
+        for (int i = 0; i < s_wins.Count; i++)
+        {
+            Win w = s_wins[i];
+            if (!w.Ground && sx >= w.R.L && sx <= w.R.R && sy >= w.R.T && sy <= w.R.B) return true;
+        }
+        return false;
+    }
+
+    // If the wind just drove the flake into the side of a window, stop it there with a little puff.
+    void HitWall(ref Flake f, float prevX)
+    {
+        float sx = f.X + _ox, sy = f.Y + _oy, px = prevX + _ox;
+        for (int i = 0; i < s_wins.Count; i++)
+        {
+            Win w = s_wins[i];
+            if (w.Ground || sy < w.R.T || sy > w.R.B || sx < w.R.L || sx > w.R.R) continue;
+            bool fromLeft = px < w.R.L, fromRight = px > w.R.R;
+            if (!fromLeft && !fromRight) return;          // it was already behind the window
+            // Spread them out a little so they don't form a perfectly straight line
+            float gap = (3f + Rand(0f, 6f)) * _s + f.R;
+            float edge = fromLeft ? w.R.L - gap : w.R.R + gap;
+            // Window edge on the edge of a screen (maximized, snapped): nothing to see there
+            float probe = 14f * _s;
+            IntPtr outside = MonitorFromPoint(new POINT { X = (int)MathF.Round(fromLeft ? edge - probe : edge + probe), Y = (int)sy }, 0);
+            IntPtr inside = MonitorFromPoint(new POINT { X = (int)MathF.Round(fromLeft ? w.R.L + probe : w.R.R - probe), Y = (int)sy }, 0);
+            if (outside == IntPtr.Zero || outside != inside) return;
+            f.X = edge - _ox;
+            f.OnWall = true;
+            f.WallDir = (sbyte)(fromLeft ? 1 : -1);
+            f.WallB = MathF.Min(w.R.B - 12f * _s, sy + Rand(12f, 55f) * _s);
+            f.Pvx = 0;
+            if (_rng.NextDouble() < 0.25)
+                AddDebris(f.X, f.Y, (fromLeft ? -1f : 1f) * Rand(40, 140) * _s, -Rand(20, 110) * _s);
+            return;
+        }
+    }
+
+    public bool StormActive => _stormLeft > 0;
+
+    // Starts a storm, or stops the current one early.
+    public void ToggleStorm()
+    {
+        if (_stormLeft > 0) { _stormLeft = 0; return; }
+        _stormLeft = StormSeconds;
+        _stormDir = _rng.Next(2) == 0 ? -1f : 1f;
     }
 
     void Spawn(ref Flake f, bool anywhere)
@@ -111,10 +181,16 @@ internal sealed unsafe class Snow
         else { f.Layer = 2; d = Rand(2.8f, 4.0f); f.Vy = Rand(35, 52); f.Op = Rand(0.55f, 0.70f); }
         f.R = d * 0.5f * _s;
         f.Vy *= _s;
+        if (_storm > 0.3f && _rng.NextDouble() < 0.05)
+        {
+            // Mid-storm, a few big blurry flakes rush past right in front of the "camera"
+            f.Layer = 2; f.R *= 2.4f; f.Op *= 0.5f; f.Vy *= 1.4f;
+        }
         f.SwayAmp = Rand(4, 14) * _s;
         f.SwayFreq = Rand(0.4f, 1.1f);
         f.Phase = Rand(0, MathF.Tau);
         f.Pvx = f.Pvy = 0;
+        f.OnWall = false;
         f.X = Rand(0, _w);
         f.Y = anywhere ? Rand(0, _h) : Rand(-60, -6) * _s;
     }
@@ -127,6 +203,30 @@ internal sealed unsafe class Snow
         _windTimer -= dt;
         if (_windTimer <= 0) { _windTarget = Rand(-16, 16) * _s; _windTimer = Rand(5, 12); }
         _wind += (_windTarget - _wind) * MathF.Min(1f, dt * 0.35f);
+
+        // Storm: eases in and out, with a strong gusty wind blowing one way
+        if (_stormLeft > 0) _stormLeft = MathF.Max(0f, _stormLeft - dt);
+        _storm += ((_stormLeft > 0 ? 1f : 0f) - _storm) * MathF.Min(1f, dt * 0.5f);
+        if (_storm < 0.002f && _stormLeft <= 0) _storm = 0f;
+        _stormClock += dt;
+
+        // Every few seconds a blast hits: the wind nearly doubles and rips snow off everything
+        _blast *= MathF.Exp(-0.9f * dt);
+        _blastTimer -= dt;
+        if (_storm > 0.5f && _blastTimer <= 0) { _blast = 1f; _blastTimer = Rand(3.5f, 7f); }
+        if (_storm <= 0f) _blast = 0f;
+
+        float gust = 620f + 140f * MathF.Sin(_stormClock * 0.7f) + 80f * MathF.Sin(_stormClock * 1.9f);
+        float stormWind = _storm * _stormDir * gust * (1f + 0.9f * _blast) * _s;
+        float wind = _wind + stormWind;
+        int target = StormTarget();
+        if (_count < target) SetCount(Math.Min(target, _count + 80));
+        // Leftover storm flakes keep falling fast so the sky clears quickly afterwards
+        float speed = 1f + 2.4f * MathF.Max(_storm, _count > target ? 0.6f : 0f);
+        float swirl = _storm * 130f * _s;                  // turbulence: flakes get tossed up and down
+        float waveX = 0.0045f / _s, waveY = 0.0030f / _s;
+        _flakeWind = wind; _flakeSpeed = speed;
+        bool hitWalls = Wallpaper && _storm > 0.2f;       // flakes smash into the windward side of windows
 
         GetCursorPos(out POINT cur);
         _curDx = cur.X - _prevCur.X;
@@ -153,16 +253,37 @@ internal sealed unsafe class Snow
             }
 
             f.Phase += f.SwayFreq * dt;
-            float prevY = f.Y;
-            f.X += (_wind * WindFactor[f.Layer] + f.SwayAmp * MathF.Sin(f.Phase) + f.Pvx) * dt;
-            f.Y += (f.Vy + f.Pvy) * dt;
+            float prevY = f.Y, prevX = f.X;
+            if (f.OnWall)
+            {
+                // Plastered against a window: slide down its side, then get carried off again
+                f.Y += (f.Vy * 1.5f + 110f * _s + f.Pvy) * dt;
+                f.X += f.Pvx * dt;
+                f.Pvx *= damp; f.Pvy *= damp;
+                if (f.Y + _oy > f.WallB) f.Y = _h + 100f;       // slid far enough: it's gone, a new flake replaces it
+                else if (_storm < 0.15f || !Wallpaper || !StillOnWall(in f)) f.OnWall = false;
+                goto moved;
+            }
+            float vx = wind * WindFactor[f.Layer], vy = f.Vy * speed;
+            if (swirl > 0)
+            {
+                // The wind comes in waves that sweep across the screen
+                float wave = MathF.Sin(f.X * waveX + f.Y * waveY - _stormClock * 2.6f * _stormDir);
+                vx += stormWind * 0.35f * wave * WindFactor[f.Layer];
+                vy += swirl * MathF.Sin(f.X * waveX * 1.7f - _stormClock * 3.3f + f.Phase);
+            }
+            f.X += (vx + f.SwayAmp * MathF.Sin(f.Phase) + f.Pvx) * dt;
+            f.Y += (vy + f.Pvy) * dt;
             f.Pvx *= damp; f.Pvy *= damp;
+            if (hitWalls && f.Layer > 0) HitWall(ref f, prevX);
 
-            if (f.X < -20) f.X += _w + 40; else if (f.X > _w + 20) f.X -= _w + 40;
-            if (f.Y > _h + 8) { Spawn(ref f, false); continue; }
-
-            if (f.Layer > 0 && f.Y > prevY && TryLand(f.X + _ox, prevY + _oy, f.Y + _oy))
-                Spawn(ref f, false);
+        moved:
+            if (f.X < -60) f.X += _w + 120; else if (f.X > _w + 60) f.X -= _w + 120;
+            bool gone = f.Y > _h + 8
+                        || (f.Layer > 0 && f.Y > prevY && TryLand(f.X + _ox, prevY + _oy, f.Y + _oy));
+            if (!gone) continue;
+            if (_count > target) { f = _flakes[--_count]; i--; }     // storm is fading: don't replace it
+            else Spawn(ref f, false);
         }
 
         UpdateCaps(dt, cur);
@@ -174,7 +295,7 @@ internal sealed unsafe class Snow
             Debris p = _debris[i];
             float prevY = p.Y;
             p.Vy = MathF.Min(terminal, p.Vy + gravity * dt);
-            p.X += (p.Vx + _wind * 0.5f) * dt;
+            p.X += (p.Vx + (_wind + _storm * _stormDir * 500f * (1f + _blast) * _s) * 0.5f) * dt;
             p.Y += p.Vy * dt;
             p.Vx *= damp;
             bool done;
@@ -271,10 +392,11 @@ internal sealed unsafe class Snow
 
     void UpdateCaps(float dt, POINT cur)
     {
-        float grow = dt / CapFillSeconds;
+        float grow = dt / CapFillSeconds * (1f + 9f * _storm);
         foreach (Cap c in _caps.Values)
         {
             if (c.N == 0) continue;
+            if (_blast > 0.25f) Rip(c, dt);
             if (c.Ground) { UpdateGround(c, dt, cur); continue; }
             if (c.Unsettled)
             {
@@ -317,15 +439,35 @@ internal sealed unsafe class Snow
         }
     }
 
+    // A blast of wind tears chunks of snow off a surface and throws them downwind.
+    void Rip(Cap c, float dt)
+    {
+        int n = (int)(c.N * dt * 3f * _blast) + 1;
+        for (int j = 0; j < n; j++)
+        {
+            int k = _rng.Next(c.N);
+            float h = c.H[k];
+            if (h < 0.8f * _s) continue;
+            float x = c.X0 + (k + 0.5f) * c.Bw;
+            if (!InVisible(c, x)) continue;
+            float take = h * 0.6f;
+            c.H[k] = h - take;
+            AddDebris(x - _ox, c.Rect.T - h - _oy, _stormDir * Rand(250, 520) * _s, -Rand(60, 200) * _s, take * c.Bw, c.Hwnd);
+            c.Dirty = true; c.Full = false; c.Unsettled = true;
+        }
+    }
+
     // The ground: snow builds up, the mouse pushes it around, piles slowly settle.
     void UpdateGround(Cap c, float dt, POINT cur)
     {
-        float grow = dt / GroundFillSeconds, melt = 0.05f * _s * dt;
+        float grow = dt / GroundFillSeconds * (1f + 9f * _storm), melt = 0.05f * _s * dt;
+        float deep = 1f + 1.5f * _storm;      // a storm leaves deeper snow, which settles afterwards
         bool slow = false, fast = false;
         for (int k = 0; k < c.N; k++)
         {
-            if (c.H[k] < c.MaxH[k]) { c.H[k] = MathF.Min(c.MaxH[k], c.H[k] + grow * c.MaxH[k]); slow = true; }
-            else if (c.H[k] > c.MaxH[k]) { c.H[k] = MathF.Max(c.MaxH[k], c.H[k] - melt); slow = true; }   // settling
+            float full = c.MaxH[k] * deep;
+            if (c.H[k] < full) { c.H[k] = MathF.Min(full, c.H[k] + grow * c.MaxH[k]); slow = true; }
+            else if (c.H[k] > full) { c.H[k] = MathF.Max(full, c.H[k] - melt); slow = true; }   // settling
         }
 
         int top = c.Rect.T;
@@ -636,9 +778,26 @@ internal sealed unsafe class Snow
         return m / edge;
     }
 
+    // Wallpaper mode: nothing is ever drawn over the taskbar, and loose powder stays behind windows.
+    // Snow falling off a window is still drawn in front of it.
+    bool DebrisVisible(in Debris p)
+    {
+        if (!Wallpaper) return true;
+        float sx = p.X + _ox, sy = p.Y + _oy;
+        for (int i = 0; i < s_wins.Count; i++)
+        {
+            Win w = s_wins[i];
+            if ((w.Ground || p.Mass <= 0) && sx >= w.R.L && sx <= w.R.R && sy >= w.R.T && sy <= w.R.B) return false;
+        }
+        return true;
+    }
+
     public bool Render(Gfx g, out bool occluded)
     {
         g.Begin();
+
+        // Whiteout haze, only when the snow is allowed in front of the windows
+        if (!Wallpaper && _storm > 0.01f) g.Veil(_w, _h, _storm * (0.05f + 0.06f * _blast));
 
         foreach (Cap c in _caps.Values)
         {
@@ -650,6 +809,7 @@ internal sealed unsafe class Snow
         {
             ref Flake f = ref _flakes[i];
             float op = f.Op * Visibility(f.X + _ox, f.Y + _oy);
+            if (f.OnWall) op *= Math.Clamp((f.WallB - f.Y - _oy) / (40f * _s), 0f, 1f);   // fades as it slides
             if (op <= 0.01f) continue;
             if (f.Layer == 0)
             {
@@ -657,12 +817,22 @@ internal sealed unsafe class Snow
                 g.Dot(f.X, f.Y, f.R * 2.1f, op * 0.30f);
                 g.Dot(f.X, f.Y, f.R * 0.9f, op * 0.75f);
             }
+            else if (_storm > 0.15f && !f.OnWall)
+            {
+                // In a storm, flakes are drawn as streaks along the wind
+                float t = 0.03f * _storm;
+                float tx = f.X - _flakeWind * WindFactor[f.Layer] * t, ty = f.Y - f.Vy * _flakeSpeed * t;
+                op = MathF.Min(op, f.Op * Visibility(tx + _ox, ty + _oy));     // the tail must not stick out over a window
+                if (op <= 0.01f) continue;
+                g.Line(f.X, f.Y, tx, ty, f.R * 1.8f, op * 0.85f);
+            }
             else g.Dot(f.X, f.Y, f.R, op);
         }
 
         for (int i = 0; i < _debris.Count; i++)
         {
             Debris p = _debris[i];
+            if (!DebrisVisible(in p)) continue;
             g.Dot(p.X, p.Y, p.R, p.Mass > 0 ? p.Op : p.Op * MathF.Min(1f, p.Life / 0.5f));
         }
 

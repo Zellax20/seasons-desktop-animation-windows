@@ -10,6 +10,7 @@ internal sealed unsafe class Gfx : IDisposable
     [StructLayout(LayoutKind.Sequential)] public struct ColorF { public float R, G, B, A; }
     [StructLayout(LayoutKind.Sequential)] public struct Point2F { public float X, Y; }
     [StructLayout(LayoutKind.Sequential)] struct Ellipse { public float X, Y, Rx, Ry; }
+    [StructLayout(LayoutKind.Sequential)] struct RectF { public float L, T, R, B; }
 
     [StructLayout(LayoutKind.Sequential)]
     struct SwapChainDesc1
@@ -154,6 +155,24 @@ internal sealed unsafe class Gfx : IDisposable
         ((delegate* unmanaged[MemberFunction]<IntPtr, float, void>)Vt(_brush)[4])(_brush, opacity);            // SetOpacity
         var e = new Ellipse { X = x, Y = y, Rx = radius, Ry = radius };
         ((delegate* unmanaged[MemberFunction]<IntPtr, Ellipse*, IntPtr, void>)Vt(_dc)[21])(_dc, &e, _brush);   // FillEllipse
+    }
+
+    // A short streak, used for wind-blown flakes.
+    public void Line(float x0, float y0, float x1, float y1, float width, float opacity)
+    {
+        ((delegate* unmanaged[MemberFunction]<IntPtr, float, void>)Vt(_brush)[4])(_brush, opacity);
+        var a = new Point2F { X = x0, Y = y0 };
+        var b = new Point2F { X = x1, Y = y1 };
+        ((delegate* unmanaged[MemberFunction]<IntPtr, Point2F, Point2F, IntPtr, float, IntPtr, void>)Vt(_dc)[15])
+            (_dc, a, b, _brush, width, IntPtr.Zero);                                                           // DrawLine
+    }
+
+    // Covers the whole surface with a faint white haze.
+    public void Veil(float width, float height, float opacity)
+    {
+        ((delegate* unmanaged[MemberFunction]<IntPtr, float, void>)Vt(_brush)[4])(_brush, opacity);
+        var r = new RectF { R = width, B = height };
+        ((delegate* unmanaged[MemberFunction]<IntPtr, RectF*, IntPtr, void>)Vt(_dc)[17])(_dc, &r, _brush);     // FillRectangle
     }
 
     public void Fill(IntPtr geometry, float opacity)
