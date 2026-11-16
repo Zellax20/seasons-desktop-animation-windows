@@ -3,7 +3,7 @@
 Seasonal effects on the Windows desktop, a bit like what macOS does, but more low-key.
 Free, open source, no ads, no internet connection.
 
-[▶ Watch the demo](docs/demo.mp4)
+https://github.com/user-attachments/assets/92117ef1-6da9-4a58-bef4-2709755ba07e
 
 | Season | Status |
 |---|---|
